@@ -1,176 +1,205 @@
-# Εκπαίδευση U-Net στις εικόνες εμβρύων
+# Embryo U-Net Segmentation
 
-Το project εκπαιδεύει έτοιμο U-Net από τη segmentation-models-pytorch ώστε να
-παράγει δυαδική μάσκα της επισημασμένης περιοχής: 1 για zona, 0 για υπόλοιπη εικόνα.
-Δεν εκπαιδεύει ταξινομητή ποιότητας εμβρύων.
+Train a U-Net model on embryo image/mask pairs and use the saved checkpoint to segment new images. The model is provided by `segmentation-models-pytorch` and uses a ResNet-18 encoder.
 
-## 1. Άνοιγμα στο Visual Studio Code με WSL
+## Tested environment
 
-Στο τερματικό WSL:
+- Ubuntu or Ubuntu on WSL2
+- Python 3.13
+- PyTorch 2.7.1
+- CUDA 12.6
+- NVIDIA GeForce GTX 1080
+
+CPU execution is also supported.
+
+## Files
+
+- `train.py`: validates the dataset, creates grouped train/validation/test splits, trains the model, evaluates the held-out test split, and saves results.
+- `predict.py`: loads a saved `best_model.pt` checkpoint and segments a new image.
+- `data_utils.py`: validates dataset files, creates grouped splits, resizes images with letterboxing, and prepares training tensors.
+- `dataset.json`: dataset manifest containing sample IDs, relative image/mask paths, hashes, source names, group names, and mask label values.
+- `requirements.txt`: pinned PyTorch/CUDA dependencies.
+
+## NVIDIA driver and WSL2
+
+When using WSL2, install the current NVIDIA driver in Windows. Do not install a Linux NVIDIA display driver inside WSL2.
+
+Confirm that Ubuntu can access the GPU:
 
 ```bash
-cd /mnt/c/Users/spaho/Documents/Codex/2026-09-14/x20/outputs/unet_training
-code .
+nvidia-smi
 ```
 
-Στο VS Code εγκατέστησε τις Microsoft Python και Python Debugger στο WSL αν λείπουν.
-
-## 2. Python 3.12 και βιβλιοθήκες
-
-Στο τερματικό του VS Code, μέσα στον παραπάνω φάκελο:
-
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-Το requirements.txt περιλαμβάνει torch, torchvision, segmentation-models-pytorch,
-numpy και Pillow. Αν χρησιμοποιείς ήδη άλλο εικονικό περιβάλλον, εκτέλεσε πρώτα
-`deactivate`. Αν η δημιουργία περιβάλλοντος αναφέρει ότι λείπει το ensurepip,
-σε Ubuntu με Python 3.12 εγκατέστησε το αντίστοιχο πακέτο:
+## Install `uv`
 
 ```bash
 sudo apt update
-sudo apt install python3.12-venv
+sudo apt install pipx
+pipx install uv
+pipx ensurepath
+source ~/.bashrc
 ```
 
-Πάτησε Ctrl+Shift+P → Python: Select Interpreter → επίλεξε το .venv/bin/python
-αυτού του project. Η εκτέλεση F5 χρησιμοποιεί τον επιλεγμένο interpreter.
+## Create the environment
 
-## 3. Τα δεδομένα
-
-Δεν χρειάζεται να μετακινήσεις ή να μετονομάσεις τις εικόνες.
-Οι διαδρομές Windows/WSL αναγνωρίζονται αυτόματα για τον υπολογιστή σου.
-Σε άλλον υπολογιστή χρησιμοποίησε `--data-root "/διαδρομή/embryos1,2,3,4"`.
-
-Το dataset.json περιέχει 114 ελεγμένες αντιστοιχίσεις, από τις αποθηκευμένες
-λίστες εικόνων και μασκών στα τέσσερα gTruth.mat. Δεν χρησιμοποιείται
-αλφαβητική αντιστοίχιση εικόνων με Label_N.png. Για κάθε ζευγάρι διατηρούνται
-η πηγή, η σειρά εγγραφής και τα SHA256 των αρχείων. Οι επιπλέον φάκελοι με
-αντίγραφα ή εναλλακτικές μάσκες δεν εισάγονται στην εκπαίδευση.
-
-| Σύνολο | Ζευγάρια | Έμβρυα |
-|---|---:|---:|
-| embryos1 | 39 | 13 |
-| embryos2 | 24 | 8 |
-| embryos3 | 24 | 8 |
-| embryos4 | 27 | 9 |
-| Σύνολο | 114 | 38 |
-
-Με βάση την επιβεβαίωση του χρήστη, ίδιο P σε διαφορετικό φάκελο σημαίνει
-διαφορετικό έμβρυο. Ο διαχωρισμός γίνεται ανά «φάκελος + P» και με
-εκπροσώπηση κάθε φακέλου σε κάθε τμήμα:
-
-- Training: 72 εικόνες από 24 έμβρυα, για ενημέρωση βαρών.
-- Validation: 27 εικόνες από 9 έμβρυα, για επιλογή καλύτερου checkpoint.
-- Test: 15 εικόνες από 5 έμβρυα, για τελικό έλεγχο αφού επιλεγεί το checkpoint.
-
-Οι λήψεις 25h, 69h, 117h ενός εμβρύου παραμένουν μαζί. Μην επιλέγεις
-ρυθμίσεις με βάση το test Dice· χρησιμοποίησε το validation για τις αλλαγές.
-
-Άνοιξε τα check_embryos1.jpg έως check_embryos4.jpg για έλεγχο της επισήμανσης.
-Στο embryos3 παρατηρείται κυρίως λεπτή γραμμή, ενώ αλλού παχύς δακτύλιος.
-Αυτό είναι διαφορετικός ορισμός στόχου και μπορεί να περιορίσει την απόδοση.
-Το project επιτρέπει την αρχική εκπαίδευση με τις υπάρχουσες επισημάνσεις,
-χωρίς να τις αλλάζει ή να τις γεμίζει αυτόματα. Για συνεπή κατάτμηση zona
-χρειάζεται κοινός κανόνας επισήμανσης σε όλα τα σύνολα.
-
-## 4. Έλεγχος πριν από την εκπαίδευση
+From the repository directory:
 
 ```bash
-python train.py --check
+uv python install 3.13
+uv venv --python 3.13 .venv
+source .venv/bin/activate
 ```
 
-Ελέγχει τα αρχεία, τις τιμές μασκών 0/1, τις διαστάσεις, την ακεραιότητα
-των αρχείων και ότι οι μάσκες δεν εξαφανίζονται μετά την αλλαγή μεγέθους.
-Δεν εκτελεί εκπαίδευση. Αν άλλαξες εικόνες ή μάσκες, οι καταχωρίσεις
-του dataset.json χρειάζονται νέα επαλήθευση και ενημέρωση.
-
-## 5. Εκπαίδευση
+Install the dependencies:
 
 ```bash
-python train.py --epochs 30 --device cpu --run-name zona_first
+UV_HTTP_TIMEOUT=600 UV_HTTP_RETRIES=10 uv pip install \
+  -r requirements.txt \
+  --index-strategy unsafe-best-match
 ```
 
-Μία εποχή (epoch) είναι ένα πέρασμα από όλες τις εικόνες training.
-Η προεπιλογή είναι CPU, επειδή η προηγούμενη εκτέλεσή σου ανέφερε ασύμβατο
-driver CUDA. Η πρώτη εκτέλεση με ImageNet χρειάζεται σύνδεση για λήψη βαρών
-του encoder. Αν θέλεις εκπαίδευση από τυχαία αρχικοποίηση χωρίς αυτή τη λήψη:
+The initial download is large and may take several minutes.
+
+Verify PyTorch and CUDA:
 
 ```bash
-python train.py --epochs 30 --device cpu --weights none --run-name zona_scratch
+python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.version.cuda); print('GPU available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
 ```
 
-Το U-Net δημιουργείται με:
+Expected GPU output is similar to:
 
-```python
-model = smp.Unet(
-    encoder_name="resnet18",
-    encoder_weights="imagenet",
-    in_channels=3,
-    classes=1,
-)
+```text
+PyTorch: 2.7.1+cu126
+CUDA: 12.6
+GPU available: True
+GPU: NVIDIA GeForce GTX 1080
 ```
 
-Οι εικόνες φορτώνονται RGB. Κοινό resize και μαύρο padding τις φέρνουν σε
-512×512 χωρίς αλλαγή αναλογιών. Οι μάσκες χρησιμοποιούν nearest-neighbor
-resize. Το padding εξαιρείται από loss και μετρικές. Στο training εφαρμόζονται
-κοινές αναστροφές εικόνας/μάσκας και μικρές αλλαγές φωτεινότητας μόνο στην εικόνα.
-Χρησιμοποιούνται ImageNet normalization, Adam (lr=0.0001) και BCE + Dice loss.
+## Dataset manifest
 
-Τα βάρη ImageNet αφορούν τον encoder· ολόκληρο το U-Net εκπαιδεύεται στον
-δικό σου στόχο. Batch size: 2. Η εκπαίδευση στην CPU μπορεί να διαρκέσει αρκετά.
-Για ταχύτερη αρχική δοκιμή μπορείς να προσθέσεις `--size 256`, με απώλεια
-λεπτομέρειας στα λεπτά περιγράμματα. Ο προέλεγχος σταματά αν μια μάσκα χαθεί.
+Paths in `dataset.json` are relative to the directory supplied with `--data-root`. Each sample must provide an image and a single-channel mask with identical dimensions. The files must match the SHA-256 hashes stored in the manifest.
 
-Το train.py εμφανίζει πρόοδο ανά batches και validation Dice σε κάθε εποχή.
-Αποθηκεύει το καλύτερο μοντέλο βάσει validation Dice και σταματά νωρίς αν
-δεν βελτιωθεί για 10 εποχές. Δεν υπάρχει λειτουργία συνέχισης εκπαίδευσης:
-κάθε εκτέλεση ξεκινά από την αρχή. Για νέα εκτέλεση χρησιμοποίησε άλλο
---run-name ή παράλειψέ το για αυτόματο όνομα με ημερομηνία.
+Samples from the same embryo group remain in the same split. Each source must contain at least five independent groups so that train, validation, and test splits can all be created.
 
-Εναλλακτικά, από Run and Debug επίλεξε «2. Train U-Net (CPU, 30 epochs)» και F5.
+## Validate the dataset
 
-## 6. Αποτελέσματα
-
-Στο runs/zona_first θα βρεις:
-
-- best_model.pt: βάρη του καλύτερου μοντέλου και ρυθμίσεις προεπεξεργασίας.
-- history.csv: loss και validation Dice/IoU ανά εποχή.
-- split.json: ακριβείς εικόνες και έμβρυα κάθε τμήματος.
-- config.json: ρυθμίσεις και εκδόσεις βιβλιοθηκών.
-- test_metrics.json: τελικό test Dice/IoU και καλύτερη εποχή.
-- test_predictions: για κάθε εικόνα test, prediction.png, probability.png,
-  overlay.png και comparison.png στις αρχικές διαστάσεις.
-
-Οι μετρικές είναι μέσοι όροι ανά εικόνα στην ανάλυση εισόδου του μοντέλου,
-με όριο πιθανότητας 0.5. Δεν είναι μετρικές υπολογισμένες στις εικόνες πλήρους
-ανάλυσης των previews. Το Dice μετρά επικάλυψη μασκών, όχι ποσοστό κλινικής
-ή γενικής ακρίβειας. Το test περιέχει μόνο 5 έμβρυα και δίνει αρχική εκτίμηση.
-
-## 7. Πρόβλεψη σε νέα εικόνα
-
-Αντικατάστησε τη διαδρομή μετά το --image με την πραγματική νέα εικόνα:
+Always validate the dataset before training:
 
 ```bash
-python predict.py --checkpoint runs/zona_first/best_model.pt --image "/home/spaho/nea_eikona.png"
+python train.py \
+  --data-root "/absolute/path/to/embryos1,2,3,4" \
+  --manifest dataset.json \
+  --size 512 \
+  --check
 ```
 
-Η νέα εικόνα δεν χρειάζεται μάσκα για να παραχθεί πρόβλεψη. Τα αποτελέσματα
-αποθηκεύονται στο predictions, σε νέο υποφάκελο. Δεν γίνεται επανεκπαίδευση.
+This verifies file paths, hashes, image/mask dimensions, label values, non-empty masks, grouped splits, and resized masks. It does not train a model.
 
-## Έλεγχοι που έγιναν κατά την παράδοση
+## Train with the GPU
 
-Ελέγχθηκαν και τα 114 ζευγάρια, τα hashes, οι διαστάσεις, οι τιμές 0/1,
-η προεπεξεργασία, η απουσία κοινών εμβρύων μεταξύ των τμημάτων και η σύνταξη
-των αρχείων Python/JSON. Επιθεωρήθηκαν οπτικά τα τέσσερα φύλλα επικαλύψεων.
-Δεν εκτελέστηκε πλήρης εκπαίδευση ή έλεγχος checkpoint σε αυτό το περιβάλλον:
-δεν διαθέτει PyTorch και η πρόσβαση στην εκτέλεση WSL δεν ήταν διαθέσιμη.
+```bash
+python train.py \
+  --data-root "/absolute/path/to/embryos1,2,3,4" \
+  --manifest dataset.json \
+  --epochs 30 \
+  --batch-size 2 \
+  --size 512 \
+  --lr 0.0001 \
+  --weights imagenet \
+  --device cuda \
+  --patience 10 \
+  --run-name embryo_unet
+```
 
-## Πηγές
+The first run with `--weights imagenet` may download pretrained ResNet-18 encoder weights. Use `--weights none` when pretrained weights are not wanted or internet access is unavailable.
 
-- https://github.com/qubvel-org/segmentation_models.pytorch
-- https://github.com/qubvel-org/segmentation_models.pytorch/blob/main/docs/quickstart.rst
-- https://code.visualstudio.com/docs/python/debugging
+If GPU memory is insufficient, lower `--batch-size` first, then lower `--size`. The size must be at least 64 and divisible by 32.
+
+To let the script select CUDA when available and otherwise use the CPU:
+
+```bash
+python train.py --data-root "/absolute/path/to/data" --device auto
+```
+
+## Training output
+
+Each run is written to `runs/<run-name>/` and contains:
+
+- `best_model.pt`: checkpoint selected by validation Dice score.
+- `config.json`: training configuration and package versions.
+- `history.csv`: training loss and validation metrics for every epoch.
+- `split.json`: samples assigned to train, validation, and test splits.
+- `test_metrics.json`: final metrics on the held-out test split.
+- `test_predictions/`: masks and visual comparisons for held-out test images.
+
+The test split is evaluated once after the best checkpoint has been selected using the validation split.
+
+## Predict a new image
+
+```bash
+python predict.py \
+  --checkpoint runs/embryo_unet/best_model.pt \
+  --image "/absolute/path/to/image.jpg" \
+  --device cuda
+```
+
+By default, predictions are saved in a new timestamped directory under `predictions/`.
+
+Choose an explicit output directory and threshold:
+
+```bash
+python predict.py \
+  --checkpoint runs/embryo_unet/best_model.pt \
+  --image "/absolute/path/to/image.jpg" \
+  --output predictions/example_01 \
+  --threshold 0.5 \
+  --border-ratio 0.0 \
+  --device cuda
+```
+
+The output directory must not already exist.
+
+To compare the prediction with a reference mask and print Dice/IoU:
+
+```bash
+python predict.py \
+  --checkpoint runs/embryo_unet/best_model.pt \
+  --image "/absolute/path/to/image.jpg" \
+  --mask "/absolute/path/to/reference_mask.png" \
+  --device cuda
+```
+
+The current prediction code expects reference-mask background pixels to be `0` and foreground pixels to be `1`. The reference mask must have the same dimensions as the input image.
+
+Prediction output contains:
+
+- `prediction_raw.png`: thresholded mask before border removal.
+- `prediction.png`: final binary mask.
+- `probability.png`: foreground probability map.
+- `overlay.png`: prediction overlaid on the input image.
+- `comparison.png`: input, optional reference mask, prediction, and overlay panels.
+
+## Monitor GPU usage
+
+During training, run this in another terminal:
+
+```bash
+watch -n 1 nvidia-smi
+```
+
+## Resume work later
+
+Activate the environment whenever a new terminal is opened:
+
+```bash
+cd ~/Unet-2
+source .venv/bin/activate
+```
+
+Deactivate it with:
+
+```bash
+deactivate
+```
+
+The `.venv`, `runs`, and generated prediction directories should not be committed to Git.

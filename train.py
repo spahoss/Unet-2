@@ -88,7 +88,7 @@ def main():
 
     def evaluate(loader):
         model.eval()
-        losses,dices,ious = [],[],[]
+        losses,dices,ious,accuracies = [],[],[],[]
         with torch.inference_mode():
             for x,y,v in loader:
                 x,y,v = x.to(device),y.to(device),v.to(device)
@@ -100,9 +100,13 @@ def main():
                 intersection = (pred&truth).sum(axes).float()
                 union = (pred|truth).sum(axes).float()
                 total = pred.sum(axes)+truth.sum(axes)
+                valid_pixels = v > 0
+                correct = ((pred == truth) & valid_pixels).sum(axes).float()
+                accuracy = correct / valid_pixels.sum(axes).clamp_min(1)
+                accuracies.extend(accuracy.cpu().tolist())
                 dices.extend(((2*intersection+1e-6)/(total+1e-6)).cpu().tolist())
                 ious.extend(((intersection+1e-6)/(union+1e-6)).cpu().tolist())
-        return dict(loss=float(np.mean(losses)),dice=float(np.mean(dices)),iou=float(np.mean(ious)))
+        return dict(loss=float(np.mean(losses)),dice=float(np.mean(dices)),iou=float(np.mean(ious)),accuracy=float(np.mean(accuracies)))
 
     name = args.run_name or datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     if Path(name).name != name or name in ('.','..') or '/' in name or '\\' in name:
@@ -118,7 +122,7 @@ def main():
     (run/'config.json').write_text(json.dumps(config,indent=2),encoding='utf-8')
     best,bad_epochs = -1.0,0
     with (run/'history.csv').open('w',newline='',encoding='utf-8') as file:
-        writer = csv.DictWriter(file,fieldnames=['epoch','train_loss','val_loss','val_dice','val_iou'])
+        writer = csv.DictWriter(file,fieldnames=['epoch','train_loss','val_loss','val_dice','val_iou','val_accuracy'])
         writer.writeheader()
         for epoch in range(1,args.epochs+1):
             model.train()
@@ -137,10 +141,10 @@ def main():
                     print(f'Epoch {epoch}/{args.epochs} batch {batch}/{len(loaders["train"])} loss={loss.item():.4f}',flush=True)
             val = evaluate(loaders['val'])
             metrics = dict(epoch=epoch,train_loss=total_loss/total_images,
-                           val_loss=val['loss'],val_dice=val['dice'],val_iou=val['iou'])
+                           val_loss=val['loss'],val_dice=val['dice'],val_iou=val['iou'],val_accuracy=val['accuracy'])
             writer.writerow(metrics)
             file.flush()
-            print(f'Epoch {epoch}: train_loss={metrics["train_loss"]:.4f} val_dice={val["dice"]:.4f}',flush=True)
+            print(f'Epoch {epoch}: train_loss={metrics["train_loss"]:.4f} val_dice={val["dice"]:.4f} val_iou={val["iou"]:.4f} val_accuracy={val["accuracy"]:.2%}',flush=True)
             if val['dice'] > best:
                 best,bad_epochs = val['dice'],0
                 # CPU tensors make the checkpoint usable on CPU or GPU.

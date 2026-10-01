@@ -49,6 +49,7 @@ def save_prediction(model,device,image_path,size,destination,mask_path=None,thre
             dice = float((2 * intersection + 1e-6) / (binary.sum() + truth.sum() + 1e-6))
             union = np.logical_or(binary, truth).sum()
             iou = float((intersection + 1e-6) / (union + 1e-6))
+            accuracy = float(np.mean(binary == truth))
             panels.append(('Ground truth',Image.fromarray(truth.astype('uint8')*255).convert('RGB')))
     panels += [('Prediction',mask.convert('RGB')),('Overlay',overlay)]
     tw,th = 400,round(h*400/w)
@@ -58,7 +59,7 @@ def save_prediction(model,device,image_path,size,destination,mask_path=None,thre
         draw.text((i*tw+8,10),label,fill='black')
         canvas.paste(panel.resize((tw,th)),(i*tw,35))
     canvas.save(destination/'comparison.png')
-    return ({'dice': dice, 'iou': iou} if mask_path is not None else None)
+    return ({'dice': dice, 'iou': iou, 'accuracy': accuracy} if mask_path is not None else None)
 
 
 def main():
@@ -93,7 +94,9 @@ def main():
     print(f'Foreground threshold: {a.threshold:.2f}')
     print(f'Border removal: {a.border_ratio:.2f}')
     if metrics is not None:
-        print(f"Image Dice: {metrics['dice']:.4f} | Image IoU: {metrics['iou']:.4f}")
+        print(f"Image Dice: {metrics['dice']:.4f} | Image IoU: {metrics['iou']:.4f} | Pixel Accuracy: {metrics['accuracy']:.4f}")
+    else:
+        print("Δεν μπορεί να υπολογιστεί accuracy χωρίς πραγματική μάσκα (--mask).")    
 
 
 if __name__=='__main__':

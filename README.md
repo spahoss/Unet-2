@@ -1,8 +1,141 @@
-# Εκπαίδευση U-Net στις εικόνες εμβρύων
+# U-Net για κατάτμηση της zona σε εικόνες εμβρύων
 
-## Γρήγορη εκτέλεση: ηλικία, διαγράμματα και πίνακας επιπέδων
+Ερευνητικό project δυαδικής κατάτμησης εικόνων εμβρύων με U-Net. Υποστηρίζει εκπαίδευση σε όλες τις ηλικίες ή χωριστά στις **25h**, **69h** και **117h**, εκτέλεση σε CPU/CUDA, grouped train/validation/test splits, live διαγράμματα, model summary, πρόβλεψη από terminal και εφαρμογή Streamlit.
 
-Από το τερματικό του project στο Ubuntu/WSL, με ενεργό το `.venv`:
+> Το project προορίζεται για πειραματική και ερευνητική χρήση. Δεν αποτελεί κλινικό εργαλείο.
+
+## Μοντέλο
+
+Χρησιμοποιείται `smp.Unet` από το `segmentation-models-pytorch` με ResNet-18 encoder, RGB είσοδο, μία κλάση εξόδου, ImageNet normalization, Adam optimizer και BCE + Dice loss. Η προεπιλεγμένη είσοδος είναι 512×512 με letterbox padding. Το padding εξαιρείται από loss και μετρικές.
+
+## Κύρια αρχεία
+
+| Αρχείο | Ρόλος |
+|---|---|
+| `train.py` | Έλεγχος δεδομένων, training, validation, test και αποθήκευση αποτελεσμάτων |
+| `predict.py` | Prediction από αποθηκευμένο `best_model.pt` |
+| `data_utils.py` | Έλεγχος ζευγών, grouped splits και preprocessing |
+| `emvryos_data.py` | Ανάγνωση MATLAB v5 `gTruth.mat` |
+| `age_utils.py` | Επιλογή ηλικίας και έλεγχος checkpoint |
+| `prepare_data.py` | Δημιουργία dataset με σταθερά splits |
+| `training_progress.py` | Live και αποθηκευμένα training charts |
+| `model_summary.py` | Πίνακας layers, activations και parameters |
+| `streamlit_app.py` | Γραφική εφαρμογή prediction |
+| `web_predict.py` | Validation uploads και prediction backend |
+
+## Ελεγμένη διαμόρφωση
+
+- Ubuntu ή Ubuntu μέσω WSL2
+- Python 3.13
+- PyTorch 2.7.1
+- CUDA 12.6
+- NVIDIA GeForce GTX 1080
+
+Το project λειτουργεί και σε CPU, αλλά το training είναι σημαντικά πιο αργό.
+
+## 1. Clone και εγκατάσταση
+
+```bash
+git clone https://github.com/spahoss/Unet-2.git
+cd Unet-2
+
+sudo apt update
+sudo apt install pipx
+pipx install uv
+pipx ensurepath
+source ~/.bashrc
+
+uv python install 3.13
+uv venv --python 3.13 .venv
+source .venv/bin/activate
+
+UV_HTTP_TIMEOUT=600 UV_HTTP_RETRIES=10 uv pip install \
+  -r requirements.txt \
+  --index-strategy unsafe-best-match
+```
+
+Η πρώτη εγκατάσταση είναι μεγάλη επειδή περιλαμβάνει τα CUDA wheels του PyTorch.
+
+### Έλεγχος GPU
+
+```bash
+nvidia-smi
+python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.version.cuda); print('GPU available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
+```
+
+Αναμενόμενο αποτέλεσμα:
+
+```text
+PyTorch: 2.7.1+cu126
+CUDA: 12.6
+GPU available: True
+GPU: NVIDIA GeForce GTX 1080
+```
+
+Στο WSL2 ο NVIDIA driver εγκαθίσταται στα Windows. Μην εγκαταστήσεις Linux display driver μέσα στο WSL.
+
+## 2. Δεδομένα
+
+Η προεπιλεγμένη διαδρομή είναι:
+
+```text
+/mnt/c/Users/spaho/Desktop/Emvryos
+```
+
+Σε άλλη τοποθεσία χρησιμοποίησε `--data-root`. Ο αναγνώστης αναζητά αναδρομικά τα `gTruth.mat` κάτω από `embrios1` έως `embrios4` και χρησιμοποιεί τις αποθηκευμένες MATLAB λίστες για την αντιστοίχιση εικόνων/μασκών.
+
+Το πλήρες dataset περιλαμβάνει 114 εικόνες από 38 έμβρυα:
+
+| Πηγή | Εικόνες | Έμβρυα |
+|---|---:|---:|
+| embryos1 | 39 | 13 |
+| embryos2 | 24 | 8 |
+| embryos3 | 24 | 8 |
+| embryos4 | 27 | 9 |
+| **Σύνολο** | **114** | **38** |
+
+Οι λήψεις 25h, 69h και 117h του ίδιου εμβρύου παραμένουν στο ίδιο split. Το `embrios3` περιέχει contour annotations, ενώ οι άλλες πηγές κυρίως area annotations. Η προεπιλογή τα περιλαμβάνει όλα. Για εξαίρεση χρησιμοποίησε `--exclude-contour-source`.
+
+## 3. Έλεγχος dataset
+
+```bash
+python train.py \
+  --data-root "/mnt/c/Users/spaho/Desktop/Emvryos" \
+  --check
+```
+
+Ελέγχονται paths, IDs, hashes, διαστάσεις, τιμές labels, μη κενές μάσκες, grouped splits και resized masks. Δεν εκτελείται training.
+
+## 4. Training
+
+### Όλες οι ηλικίες
+
+```bash
+python train.py \
+  --data-root "/mnt/c/Users/spaho/Desktop/Emvryos" \
+  --epochs 30 \
+  --batch-size 2 \
+  --device cuda \
+  --seed 42 \
+  --run-name zona_all_01
+```
+
+### Μία ηλικία
+
+```bash
+python train.py \
+  --data-root "/mnt/c/Users/spaho/Desktop/Emvryos" \
+  --age 25 \
+  --epochs 30 \
+  --batch-size 2 \
+  --device cuda \
+  --seed 42 \
+  --run-name zona_25h_01
+```
+
+Έγκυρες ηλικίες: `25`, `69`, `117`. Χωρίς `--age` χρησιμοποιούνται όλες. Για age-specific training το split seed είναι `seed + age`. Το αναμενόμενο split κάθε ηλικίας είναι 24 train / 9 validation / 5 test εικόνες. Για όλες τις ηλικίες είναι 72/27/15.
+
+### Live charts και model summary
 
 ```bash
 python train.py \
@@ -10,301 +143,163 @@ python train.py \
   --age 25 \
   --epochs 30 \
   --device cuda \
-  --batch-size 2 \
-  --seed 42 \
   --run-name zona_25h_monitor_01 \
-  --summary \
-  --plot
+  --plot \
+  --summary
 ```
 
-Το project χρειάζεται τα `train.py`, `data_utils.py`, `emvryos_data.py`,
-`age_utils.py`, `training_progress.py`, `model_summary.py` και `predict.py`.
-Για άλλη ηλικία επίλεξε `--age 69` ή `--age 117` και νέο όνομα εκτέλεσης.
-Χωρίς `--age` εκπαιδεύεται ένα μοντέλο με όλες τις ηλικίες.
-Για κάθε ηλικία επιλέγονται 38 εικόνες και ο ανεξάρτητος τυχαίος διαχωρισμός
-δίνει 24 train, 9 validation, 5 test. Ίδια δεδομένα και ίδιο seed αναπαράγουν
-τον διαχωρισμό· άλλαξε το `--seed` για διαφορετική κλήρωση. Τα προετοιμασμένα
-datasets διατηρούν τον ήδη αποθηκευμένο διαχωρισμό τους.
+Με `--plot` εμφανίζεται σύνδεσμος `Live training charts:`. Άνοιξέ τον όσο εκτελείται το training. Το `training_progress.html` αποθηκεύεται πάντα. Με `--summary` αποθηκεύονται και `model_summary.html/csv/json`.
 
-### Πώς ανοίγουν τα αποτελέσματα
-
-| Τι θέλεις να δεις | Πώς το ανοίγεις | Πότε λειτουργεί |
-|---|---|---|
-| Ζωντανά διαγράμματα | Ο ακριβής σύνδεσμος μετά το `Live training charts:` στο τερματικό | Όσο εκτελείται το πρόγραμμα με `--plot` |
-| Αποθηκευμένα διαγράμματα | Το `training_progress.html` μέσα στον φάκελο του run | Και μετά την ολοκλήρωση, χωρίς server |
-| Πίνακας επιπέδων | Το `model_summary.html` μέσα στον φάκελο του run | Αφού δημιουργηθεί με `--summary` ή `--summary-only`, χωρίς server |
-
-Η θύρα του localhost επιλέγεται αυτόματα σε κάθε εκτέλεση. Μην χρησιμοποιείς
-μια θύρα από παράδειγμα ή προηγούμενο run. Αντέγραψε **ολόκληρο τον σύνδεσμο
-που εμφανίζει η τρέχουσα εκτέλεση** και άνοιξέ τον στον browser του ίδιου
-υπολογιστή. Το πρόγραμμα δεν ανοίγει αυτόματα παράθυρο browser.
-
-Για να ανοίξεις τον φάκελο της παραπάνω εκτέλεσης από WSL:
+Μόνο model summary:
 
 ```bash
-explorer.exe "$(wslpath -w "$PWD/runs/zona_25h_monitor_01")"
+python train.py \
+  --data-root "/mnt/c/Users/spaho/Desktop/Emvryos" \
+  --age 25 \
+  --device cpu \
+  --weights none \
+  --summary-only \
+  --run-name layer_analysis_25h
 ```
 
-Κάνε διπλό κλικ στο `model_summary.html` ή στο `training_progress.html`.
-Τα αρχεία είναι αυτοτελή και δεν απαιτούν localhost. Το αποθηκευμένο
-διάγραμμα είναι στιγμιότυπο, όχι η ζωντανή σελίδα.
+### Βασικές επιλογές
 
-### Αν εμφανίζεται ERR_CONNECTION_REFUSED
+| Επιλογή | Default | Περιγραφή |
+|---|---:|---|
+| `--epochs` | 30 | Μέγιστος αριθμός epochs |
+| `--batch-size` | 2 | Batch size |
+| `--size` | 512 | Τουλάχιστον 64 και πολλαπλάσιο του 32 |
+| `--lr` | 0.0001 | Learning rate |
+| `--weights` | `imagenet` | `imagenet` ή `none` |
+| `--device` | `cpu` | `cpu`, `cuda` ή `auto` |
+| `--patience` | 10 | Early-stopping patience |
+| `--seed` | 42 | Training/split base seed |
 
-1. Έλεγξε ότι το training ακόμη εκτελείται και δεν έχει τερματιστεί με σφάλμα.
-2. Έλεγξε ότι πρόσθεσες `--plot` και ότι εμφανίστηκε `Live training charts:`.
-3. Άνοιξε τον σύνδεσμο της τρέχουσας εκτέλεσης, όχι μια παλιά θύρα.
-4. Αν το run έχει τελειώσει, άνοιξε το αποθηκευμένο `training_progress.html`.
-5. Αν το run εκτελείται και ο σωστός σύνδεσμος δεν ανοίγει, δοκίμασε και τον
-   κανονικό browser Windows. Έλεγξε τη σύνδεση localhost μεταξύ Windows και WSL.
+Το `--weights imagenet` μπορεί να κατεβάσει pretrained weights την πρώτη φορά. Για offline χρήση βάλε `--weights none`. Αν εξαντλείται η GPU μνήμη, μείωσε πρώτα το batch size και μετά το input size.
 
-Το `--summary-only` δημιουργεί μόνο τον πίνακα και επιστρέφει χωρίς training
-ή live server, ακόμη και αν προσθέσεις `--plot`. Το `--check` ελέγχει μόνο
-τα δεδομένα και επίσης δεν εκκινεί server.
+## 5. Αποτελέσματα training
 
-Για μόνο πίνακα επιπέδων:
+Κάθε run γράφεται στο `runs/<run-name>/`:
 
-```bash
-python train.py --age 25 --device cpu --weights none --summary-only --run-name layer_analysis_02
+```text
+runs/<run-name>/
+├── best_model.pt
+├── config.json
+├── history.csv
+├── split.json
+├── test_metrics.json
+├── training_progress.html
+├── training_progress.json
+├── model_summary.html       # όταν ζητηθεί
+├── model_summary.csv        # όταν ζητηθεί
+├── model_summary.json       # όταν ζητηθεί
+└── test_predictions/
 ```
 
-Περισσότερες λεπτομέρειες: [διαγράμματα](README_PROGRESS.md),
-[πίνακας επιπέδων](README_MODEL_SUMMARY.md), [εκπαίδευση ανά ηλικία](README_BY_AGE.md).
+Το καλύτερο checkpoint επιλέγεται με validation Dice. Το held-out test αξιολογείται μία φορά μετά την επιλογή checkpoint. Το pixel accuracy περιλαμβάνει το φόντο και δεν πρέπει να ερμηνεύεται μόνο του.
 
-Η προεπιλογή πλέον διαβάζει αναδρομικά τον φάκελο `Desktop/Emvryos`.
-Το νέο `emvryos_data.py` διαβάζει τις αποθηκευμένες λίστες των τεσσάρων
-`gTruth.mat` και εντοπίζει τα σημερινά αρχεία από τις παλιές διαδρομές MATLAB.
-Συμπεριλαμβάνονται και τα 114 ζευγάρια, όπως ζήτησε ο χρήστης, ακόμη και οι
-24 μάσκες περιγράμματος του embrios3. Καμία μάσκα δεν γεμίζει ή αλλάζει αυτόματα.
-Τα αντίγραφα, οι συνεδρίες και οι εναλλακτικές μάσκες δεν γίνονται πρόσθετα δείγματα.
-Ο αναγνώστης υποστηρίζει τη συγκεκριμένη ελεγμένη μορφή MATLAB v5· άγνωστη
-μορφή ή αμφίβολη αντιστοίχιση προκαλεί σαφές σφάλμα αντί για αυθαίρετο ζευγάρωμα.
+## 6. Prediction από terminal
 
-Έλεγχος και απευθείας εκπαίδευση, από το τερματικό του project:
+### Βασική χρήση
 
 ```bash
-python train.py --check --seed 42
-python train.py --epochs 30 --device cuda --batch-size 2 --seed 42
+python predict.py \
+  --checkpoint runs/zona_25h_01/best_model.pt \
+  --image "/διαδρομή/προς/εικόνα.png" \
+  --age 25 \
+  --device cuda
 ```
 
-Προαιρετικά, δημιουργία χωριστών φακέλων με αντίγραφα (τα αρχικά διατηρούνται):
+Το `--age` ελέγχει τη συμβατότητα του checkpoint. Αν το filename περιέχει ηλικία όπως `25h`, ελέγχεται επίσης.
+
+### Threshold, border removal και output
 
 ```bash
-python prepare_data.py --seed 42
+python predict.py \
+  --checkpoint runs/zona_25h_01/best_model.pt \
+  --image "/διαδρομή/προς/εικόνα.png" \
+  --threshold 0.60 \
+  --border-ratio 0.10 \
+  --output predictions/example_01 \
+  --device cuda
+```
+
+Το output directory δεν πρέπει να υπάρχει ήδη. Χωρίς `--output`, δημιουργείται timestamped φάκελος στο `predictions/`.
+
+### Με ground-truth mask
+
+```bash
+python predict.py \
+  --checkpoint runs/zona_25h_01/best_model.pt \
+  --image "/διαδρομή/προς/εικόνα.png" \
+  --mask "/διαδρομή/προς/mask.png" \
+  --age 25 \
+  --device cuda
+```
+
+Στο CLI η reference mask πρέπει να είναι ενός καναλιού, με ίδιες διαστάσεις και τιμές ακριβώς `0/1`.
+
+Κάθε prediction περιέχει `prediction_raw.png`, `prediction.png`, `probability.png`, `overlay.png`, `comparison.png` και, όταν υπάρχει reference mask, `metrics.json`.
+
+## 7. Streamlit εφαρμογή
+
+Χρειάζεται τουλάχιστον ένα `best_model.pt` μέσα σε `runs/<run-name>/` ή χειροκίνητη διαδρομή checkpoint.
+
+```bash
+python -m streamlit run streamlit_app.py
+```
+
+Η εφαρμογή επιτρέπει επιλογή ηλικίας, checkpoint, CPU/CUDA και threshold. Δέχεται εικόνες PNG/JPG/TIFF έως 20 MB και 12 εκατομμύρια pixels. Η προαιρετική reference mask μπορεί να έχει τιμές `0/1` ή `0/255`. Τα αποτελέσματα προβάλλονται ως mask, overlay και comparison και μπορούν να ληφθούν ως PNG ή ZIP.
+
+Το checkpoint πρέπει να έχει εκπαιδευτεί για την επιλεγμένη ηλικία.
+
+## 8. Προετοιμασμένο dataset
+
+```bash
+python prepare_data.py \
+  --source "/mnt/c/Users/spaho/Desktop/Emvryos" \
+  --destination data_emvryos \
+  --seed 42
+```
+
+Δημιουργούνται `train/images`, `train/masks`, `val/images`, `val/masks`, `test/images`, `test/masks` και `dataset.json`. Ο προορισμός δεν πρέπει να υπάρχει ήδη.
+
+```bash
 python train.py --data-root data_emvryos --check
-python train.py --data-root data_emvryos --epochs 30 --device cuda --batch-size 2
+python train.py --data-root data_emvryos --epochs 30 --device cuda --run-name prepared_01
 ```
 
-Το `data_emvryos` έχει train/val/test, καθένα με images και masks, και
-`dataset.json` με τις αντιστοιχίσεις. Το πρόγραμμα δεν αντικαθιστά υπάρχοντα
-φάκελο προετοιμασίας. Σε νέο διαχωρισμό όρισε άλλο `--destination`.
-Η επιλογή είναι τυχαία ανά έμβρυο με στόχο περίπου 65%/20%/15%, με
-στρογγυλοποίηση ανά ομάδα προέλευσης. Το seed 42 δίνει 72/27/15 εικόνες.
-Ίδιο seed και ίδια δεδομένα δίνουν ίδιο διαχωρισμό. Άλλο `--seed`, π.χ. 43,
-δίνει διαφορετικό διαχωρισμό κατά την ανάγνωση του Emvryos ή την προετοιμασία.
-Ένα ήδη προετοιμασμένο dataset κρατά πάντα τον αποθηκευμένο διαχωρισμό του.
-Για συγκρίσεις μοντέλων κράτησε σταθερό το test, μην αλλάζεις seed για καλύτερο σκορ.
-Ο παλιός φάκελος `data` παραμένει διαθέσιμος με ρητό `--data-root data`.
+Τα αποθηκευμένα splits του manifest διατηρούνται.
 
-Το project εκπαιδεύει έτοιμο U-Net από τη segmentation-models-pytorch ώστε να
-παράγει δυαδική μάσκα της επισημασμένης περιοχής: 1 για zona, 0 για υπόλοιπη εικόνα.
-Δεν εκπαιδεύει ταξινομητή ποιότητας εμβρύων.
+## 9. GPU και περιβάλλον
 
-## 1. Άνοιγμα στο Visual Studio Code με WSL
-
-Στο τερματικό WSL:
+Παρακολούθηση GPU:
 
 ```bash
-cd /mnt/c/Users/spaho/Documents/Codex/2026-09-14/x20/outputs/unet_training
-code .
+watch -n 1 nvidia-smi
 ```
 
-Στο VS Code εγκατέστησε τις Microsoft Python και Python Debugger στο WSL αν λείπουν.
-
-## 2. Python 3.12 και βιβλιοθήκες
-
-Στο τερματικό του VS Code, μέσα στον παραπάνω φάκελο:
+Ενεργοποίηση περιβάλλοντος σε νέο terminal:
 
 ```bash
-python3.12 -m venv .venv
+cd ~/Unet-2
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
 ```
 
-Το requirements.txt περιλαμβάνει torch, torchvision, segmentation-models-pytorch,
-numpy και Pillow. Αν χρησιμοποιείς ήδη άλλο εικονικό περιβάλλον, εκτέλεσε πρώτα
-`deactivate`. Αν η δημιουργία περιβάλλοντος αναφέρει ότι λείπει το ensurepip,
-σε Ubuntu με Python 3.12 εγκατέστησε το αντίστοιχο πακέτο:
+Έξοδος:
 
 ```bash
-sudo apt update
-sudo apt install python3.12-venv
+deactivate
 ```
 
-Πάτησε Ctrl+Shift+P → Python: Select Interpreter → επίλεξε το .venv/bin/python
-αυτού του project. Η εκτέλεση F5 χρησιμοποιεί τον επιλεγμένο interpreter.
+## Περιορισμοί
 
-## 3. Τα δεδομένα
+- Το test set είναι μικρό και οι μετρικές αποτελούν αρχική εκτίμηση.
+- Τα contour annotations του `embrios3` δεν έχουν τον ίδιο ορισμό στόχου με τα area annotations.
+- Το threshold πρέπει να επιλέγεται με validation δεδομένα, όχι με το held-out test.
+- Το μοντέλο κάνει segmentation της επισημασμένης περιοχής· δεν ταξινομεί ποιότητα ή βιωσιμότητα εμβρύου.
+- Δεν υπάρχει resume training από checkpoint.
 
-Δεν χρειάζεται να μετακινήσεις ή να μετονομάσεις τις εικόνες.
-Οι διαδρομές Windows/WSL αναγνωρίζονται αυτόματα για τον υπολογιστή σου.
-Σε άλλον υπολογιστή χρησιμοποίησε `--data-root "/διαδρομή/Emvryos"`.
+## Git
 
-Το παλιό dataset.json παραμένει ως καταγραφή του προηγούμενου dataset.
-Η νέα αυτόματη ανάγνωση δεν το χρησιμοποιεί: ανακτά τις αντιστοιχίσεις από τις
-λίστες εικόνων και μασκών στα τέσσερα gTruth.mat. Δεν χρησιμοποιείται
-αλφαβητική αντιστοίχιση εικόνων με Label_N.png. Για κάθε ζευγάρι διατηρούνται
-η πηγή, η σειρά εγγραφής και τα SHA256 των αρχείων. Οι επιπλέον φάκελοι με
-αντίγραφα ή εναλλακτικές μάσκες δεν εισάγονται στην εκπαίδευση.
-
-| Σύνολο | Ζευγάρια | Έμβρυα |
-|---|---:|---:|
-| embryos1 | 39 | 13 |
-| embryos2 | 24 | 8 |
-| embryos3 | 24 | 8 |
-| embryos4 | 27 | 9 |
-| Σύνολο | 114 | 38 |
-
-Με βάση την επιβεβαίωση του χρήστη, ίδιο P σε διαφορετικό φάκελο σημαίνει
-διαφορετικό έμβρυο. Ο διαχωρισμός γίνεται ανά «φάκελος + P» και με
-εκπροσώπηση κάθε φακέλου σε κάθε τμήμα:
-
-- Training: 72 εικόνες από 24 έμβρυα, για ενημέρωση βαρών.
-- Validation: 27 εικόνες από 9 έμβρυα, για επιλογή καλύτερου checkpoint.
-- Test: 15 εικόνες από 5 έμβρυα, για τελικό έλεγχο αφού επιλεγεί το checkpoint.
-
-Οι λήψεις 25h, 69h, 117h ενός εμβρύου παραμένουν μαζί. Μην επιλέγεις
-ρυθμίσεις με βάση το test Dice· χρησιμοποίησε το validation για τις αλλαγές.
-
-Άνοιξε τα check_embryos1.jpg έως check_embryos4.jpg για έλεγχο της επισήμανσης.
-Στο embryos3 παρατηρείται κυρίως λεπτή γραμμή, ενώ αλλού παχύς δακτύλιος.
-Αυτό είναι διαφορετικός ορισμός στόχου και μπορεί να περιορίσει την απόδοση.
-Το project επιτρέπει την αρχική εκπαίδευση με τις υπάρχουσες επισημάνσεις,
-χωρίς να τις αλλάζει ή να τις γεμίζει αυτόματα. Για συνεπή κατάτμηση zona
-χρειάζεται κοινός κανόνας επισήμανσης σε όλα τα σύνολα.
-
-## 4. Έλεγχος πριν από την εκπαίδευση
-
-```bash
-python train.py --check
-```
-
-Ελέγχει τα αρχεία, τις τιμές μασκών 0/1, τις διαστάσεις, την ακεραιότητα
-των αρχείων και ότι οι μάσκες δεν εξαφανίζονται μετά την αλλαγή μεγέθους.
-Δεν εκτελεί εκπαίδευση. Στον αρχικό Emvryos υπολογίζονται νέα hashes κατά
-την ανάγνωση. Στα προετοιμασμένα δεδομένα ελέγχονται τα αποθηκευμένα hashes.
-Αν αλλάξεις τις μάσκες, φτιάξε νέο προετοιμασμένο dataset και έλεγξε οπτικά τα ζευγάρια.
-
-## 5. Εκπαίδευση
-
-```bash
-python train.py --epochs 30 --device cpu --run-name zona_first
-```
-
-Μία εποχή (epoch) είναι ένα πέρασμα από όλες τις εικόνες training.
-Η προεπιλογή είναι CPU· για τη λειτουργική εγκατάσταση GPU χρησιμοποίησε
-`--device cuda`. Η πρώτη εκτέλεση με ImageNet χρειάζεται σύνδεση για λήψη βαρών
-του encoder. Αν θέλεις εκπαίδευση από τυχαία αρχικοποίηση χωρίς αυτή τη λήψη:
-
-```bash
-python train.py --epochs 30 --device cpu --weights none --run-name zona_scratch
-```
-
-Το U-Net δημιουργείται με:
-
-```python
-model = smp.Unet(
-    encoder_name="resnet18",
-    encoder_weights="imagenet",
-    in_channels=3,
-    classes=1,
-)
-```
-
-Οι εικόνες φορτώνονται RGB. Κοινό resize και μαύρο padding τις φέρνουν σε
-512×512 χωρίς αλλαγή αναλογιών. Οι μάσκες χρησιμοποιούν nearest-neighbor
-resize. Το padding εξαιρείται από loss και μετρικές. Στο training εφαρμόζονται
-κοινές αναστροφές εικόνας/μάσκας και μικρές αλλαγές φωτεινότητας μόνο στην εικόνα.
-Χρησιμοποιούνται ImageNet normalization, Adam (lr=0.0001) και BCE + Dice loss.
-Στο training εφαρμόζονται επίσης τυχαίες αλλαγές φωτεινότητας, αντίθεσης,
-gamma και μικρός θόρυβος, ώστε το μοντέλο να μην εξαρτάται από μία μόνο
-απεικονιστική ρύθμιση.
-
-Τα βάρη ImageNet αφορούν τον encoder· ολόκληρο το U-Net εκπαιδεύεται στον
-δικό σου στόχο. Batch size: 2. Η εκπαίδευση στην CPU μπορεί να διαρκέσει αρκετά.
-Για ταχύτερη αρχική δοκιμή μπορείς να προσθέσεις `--size 256`, με απώλεια
-λεπτομέρειας στα λεπτά περιγράμματα. Ο προέλεγχος σταματά αν μια μάσκα χαθεί.
-
-Το train.py εμφανίζει πρόοδο ανά batches και validation Dice σε κάθε εποχή.
-Αποθηκεύει το καλύτερο μοντέλο βάσει validation Dice και σταματά νωρίς αν
-δεν βελτιωθεί για 10 εποχές. Δεν υπάρχει λειτουργία συνέχισης εκπαίδευσης:
-κάθε εκτέλεση ξεκινά από την αρχή. Για νέα εκτέλεση χρησιμοποίησε άλλο
---run-name ή παράλειψέ το για αυτόματο όνομα με ημερομηνία.
-
-Εναλλακτικά, από Run and Debug επίλεξε «2. Train U-Net (CPU, 30 epochs)» και F5.
-
-## 6. Αποτελέσματα
-
-Στο runs/zona_first θα βρεις:
-
-- best_model.pt: βάρη του καλύτερου μοντέλου και ρυθμίσεις προεπεξεργασίας.
-- history.csv: loss και validation Dice/IoU ανά εποχή.
-- split.json: ακριβείς εικόνες και έμβρυα κάθε τμήματος.
-- config.json: ρυθμίσεις και εκδόσεις βιβλιοθηκών.
-- test_metrics.json: τελικό test Dice/IoU και καλύτερη εποχή.
-- test_predictions: για κάθε εικόνα test, prediction.png, probability.png,
-  overlay.png και comparison.png στις αρχικές διαστάσεις.
-
-Οι μετρικές είναι μέσοι όροι ανά εικόνα στην ανάλυση εισόδου του μοντέλου,
-με όριο πιθανότητας 0.5. Δεν είναι μετρικές υπολογισμένες στις εικόνες πλήρους
-ανάλυσης των previews. Το Dice μετρά επικάλυψη μασκών, όχι ποσοστό κλινικής
-ή γενικής ακρίβειας. Το test περιέχει μόνο 5 έμβρυα και δίνει αρχική εκτίμηση.
-
-## 7. Πρόβλεψη σε νέα εικόνα
-
-Αντικατάστησε τη διαδρομή μετά το --image με την πραγματική νέα εικόνα:
-
-```bash
-python predict.py --checkpoint runs/zona_first/best_model.pt --image "/home/spaho/nea_eikona.png"
-```
-
-Για εικόνα από διαφορετικό μικροσκόπιο, μπορείς να δοκιμάσεις μεγαλύτερο
-κατώφλι ώστε να περιοριστούν ψευδώς θετικές περιοχές φόντου:
-
-```bash
-python predict.py --checkpoint runs/zona_first/best_model.pt --image "/home/spaho/nea_eikona.png" --threshold 0.70
-```
-
-Αν το μοντέλο επισημαίνει το επάνω ή κάτω άκρο του εξωτερικού καρέ, μπορείς
-να καθαρίσεις μόνο τα εξωτερικά περιθώρια χωρίς να αλλάξεις τα βάρη:
-
-```bash
-python predict.py --checkpoint runs/zona_first/best_model.pt --image "/home/spaho/nea_eikona.png" --threshold 0.60 --border-ratio 0.10
-```
-
-Το `--border-ratio 0.10` μηδενίζει το εξωτερικό 10% από κάθε πλευρά και είναι
-προαιρετικό. Χρησιμοποίησέ το μόνο όταν το έμβρυο βρίσκεται αρκετά μακριά από
-τα άκρα. Η `prediction_raw.png` παραμένει διαθέσιμη για σύγκριση με τη
-μεταγενέστερη `prediction.png`.
-
-Το threshold αλλάζει μόνο τη μετατροπή πιθανότητας σε δυαδική μάσκα· δεν
-αλλάζει τα βάρη. Σύγκρινε `comparison.png` για 0.50, 0.60 και 0.70. Χωρίς
-ground-truth μάσκα δεν υπάρχει αντικειμενικό Dice για να επιλέξεις threshold.
-
-Η νέα εικόνα δεν χρειάζεται μάσκα για να παραχθεί πρόβλεψη. Τα αποτελέσματα
-αποθηκεύονται στο predictions, σε νέο υποφάκελο. Δεν γίνεται επανεκπαίδευση.
-
-## Έλεγχοι που έγιναν κατά την παράδοση
-
-Ελέγχθηκαν και τα 114 ζευγάρια, τα hashes, οι διαστάσεις, οι τιμές 0/1,
-η προεπεξεργασία, η απουσία κοινών εμβρύων μεταξύ των τμημάτων και η σύνταξη
-των αρχείων Python/JSON. Επιθεωρήθηκαν οπτικά τα τέσσερα φύλλα επικαλύψεων.
-Δεν εκτελέστηκε πλήρης εκπαίδευση ή έλεγχος checkpoint σε αυτό το περιβάλλον:
-δεν διαθέτει PyTorch και η πρόσβαση στην εκτέλεση WSL δεν ήταν διαθέσιμη.
-
-## Πηγές
-
-- https://github.com/qubvel-org/segmentation_models.pytorch
-- https://github.com/qubvel-org/segmentation_models.pytorch/blob/main/docs/quickstart.rst
-- https://code.visualstudio.com/docs/python/debugging
+Τα `.venv/`, `runs/`, `predictions/`, `.env`, `__pycache__/` και `*.pyc` αγνοούνται από το Git. Τα checkpoints και τα νέα generated predictions δεν ανεβαίνουν αυτόματα.

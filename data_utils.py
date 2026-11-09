@@ -9,11 +9,16 @@ from PIL import Image
 
 HERE = Path(__file__).resolve().parent
 USER = Path('/mnt/c/Users/spaho') if Path('/mnt/c/Users/spaho/Desktop').is_dir() else Path.home()
-DEFAULT_ROOT = USER / 'Desktop' / 'embryos1,2,3,4'
+DEFAULT_ROOT = USER / 'Desktop' / 'Emvryos'
 
 
-def load_rows(root, manifest, verify=True):
-    rows = json.loads(Path(manifest).read_text(encoding='utf-8'))['samples']
+def load_rows(root, manifest=None, verify=True, include_contour_source=True):
+    root = Path(root)
+    if manifest is None:
+        from emvryos_data import discover_rows
+        rows = discover_rows(root, include_contour_source)
+    else:
+        rows = json.loads(Path(manifest).read_text(encoding='utf-8'))['samples']
     if len({r['id'] for r in rows}) != len(rows):
         raise ValueError('Duplicate sample IDs')
     for row in rows:
@@ -35,6 +40,23 @@ def load_rows(root, manifest, verify=True):
 
 
 def make_splits(rows, seed=42):
+    if any('split' in r for r in rows):
+        if not all(r.get('split') in ('train','val','test') for r in rows):
+            raise ValueError('All prepared samples must have train, val or test split')
+        splits = {s: [r for r in rows if r['split']==s] for s in ('train','val','test')}
+        if not all(splits.values()):
+            raise ValueError('Each split must contain samples')
+        groups_seen, hashes_seen = {}, {}
+        for split, subset in splits.items():
+            for r in subset:
+                if groups_seen.setdefault(r['group'], split) != split:
+                    raise ValueError('Same embryo appears in different splits')
+                if hashes_seen.setdefault(r['image_sha256'], split) != split:
+                    raise ValueError('Identical image appears in different splits')
+                for field in ('image','mask'):
+                    if Path(r[field]).parts[:2] != (split, 'images' if field=='image' else 'masks'):
+                        raise ValueError('Prepared sample path does not match its split')
+        return splits
     # Group = source folder + P code, as confirmed by the user.
     groups = sorted({r['group'] for r in rows})
     if len(groups) < 5:

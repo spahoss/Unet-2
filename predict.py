@@ -1,11 +1,13 @@
 """Load best_model.pt and segment a new image without retraining."""
 import argparse
+import json
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
 from data_utils import HERE, letterbox
+from age_utils import AGES, prediction_age
 
 
 def save_prediction(model,device,image_path,size,destination,mask_path=None,threshold=.5,border_ratio=0.0):
@@ -42,7 +44,10 @@ def save_prediction(model,device,image_path,size,destination,mask_path=None,thre
     panels = [('Input',original)]
     if mask_path is not None:
         with Image.open(mask_path) as lab:
-            truth = np.array(lab) == 1
+            labels = np.array(lab)
+            if labels.ndim != 2 or not set(np.unique(labels).tolist()) <= {0, 1}:
+                raise ValueError('Reference mask must have one channel and label values 0 and 1')
+            truth = labels == 1
             if truth.shape != binary.shape:
                 raise ValueError('Image and reference mask must have identical dimensions')
             intersection = np.logical_and(binary, truth).sum()
@@ -59,15 +64,23 @@ def save_prediction(model,device,image_path,size,destination,mask_path=None,thre
         draw.text((i*tw+8,10),label,fill='black')
         canvas.paste(panel.resize((tw,th)),(i*tw,35))
     canvas.save(destination/'comparison.png')
-    return ({'dice': dice, 'iou': iou, 'accuracy': accuracy} if mask_path is not None else None)
+    if mask_path is not None:
+        metrics = {'dice': dice, 'iou': iou, 'accuracy': accuracy,
+                   'threshold': threshold, 'border_ratio': border_ratio,
+                   'note': 'Original image resolution; final mask after optional border removal; accuracy is a fraction in [0,1].'}
+        (destination/'metrics.json').write_text(json.dumps(metrics, indent=2), encoding='utf-8')
+        return metrics
+    return None
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--checkpoint',type=Path,required=True)
     p.add_argument('--image',type=Path,required=True)
+    p.add_argument('--age',type=int,choices=AGES,default=None,
+                   help='Require a checkpoint trained for this age; otherwise infer from checkpoint')
     p.add_argument('--mask',type=Path,default=None,
-                   help='Optional ground-truth mask; prints Dice/IoU and adds it to comparison.png')
+                   help='Optional 0/1 ground-truth mask; prints Dice/IoU/pixel accuracy')
     p.add_argument('--threshold',type=float,default=.5,
                    help='Foreground probability threshold (default: 0.5)')
     p.add_argument('--border-ratio',type=float,default=0.0,
@@ -85,6 +98,11 @@ def main():
     device = torch.device(a.device)
     ckpt = torch.load(a.checkpoint,map_location='cpu',weights_only=True)
     config = ckpt['config']
+    try:
+        selected_age = prediction_age(config, a.age, a.image)
+    except ValueError as error:
+        p.error(str(error))
+    print(f'Model age: {selected_age if selected_age is not None else "all/unspecified"}',flush=True)
     model = smp.Unet(encoder_name=config['encoder'],encoder_weights=None,
                      in_channels=config['in_channels'],classes=1).to(device)
     model.load_state_dict(ckpt['model_state'])
@@ -94,9 +112,9 @@ def main():
     print(f'Foreground threshold: {a.threshold:.2f}')
     print(f'Border removal: {a.border_ratio:.2f}')
     if metrics is not None:
-        print(f"Image Dice: {metrics['dice']:.4f} | Image IoU: {metrics['iou']:.4f} | Pixel Accuracy: {metrics['accuracy']:.4f}")
+        print(f"Image Dice: {metrics['dice']:.4f} | Image IoU: {metrics['iou']:.4f} | Pixel accuracy: {metrics['accuracy']:.2%}")
     else:
-        print("Δεν μπορεί να υπολογιστεί accuracy χωρίς πραγματική μάσκα (--mask).")    
+        print('Accuracy, Dice and IoU unavailable: supply a ground-truth mask with --mask.')
 
 
 if __name__=='__main__':
